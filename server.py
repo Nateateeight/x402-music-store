@@ -93,6 +93,33 @@ app.add_middleware(
 
 app.add_middleware(PaymentMiddlewareASGI, routes=routes, server=server)
 
+
+# --- x402 v2 header conformance fix ---
+# Registered AFTER PaymentMiddlewareASGI so it is outermost and runs on the way
+# OUT after the 402 `payment-required` header is attached. The installed x402 SDK
+# emits `x402Version: 2` but serializes the price under the v1 key `amount` (not
+# v2's `maxAmountRequired`). Strict v2 buyers/validators (e.g. primer.systems)
+# reject the challenge. This rewrites each `accepts` entry to carry BOTH `amount`
+# (v1 compat) and `maxAmountRequired` (v2 canonical). Reversible, no SDK changes.
+import base64 as _b64
+
+@app.middleware("http")
+async def fix_x402_v2_header(request: Request, call_next):
+    response = await call_next(request)
+    if response.status_code == 402 and "payment-required" in response.headers:
+        try:
+            raw = response.headers["payment-required"]
+            payload = _json.loads(_b64.b64decode(raw))
+            for acc in payload.get("accepts", []):
+                if "amount" in acc and "maxAmountRequired" not in acc:
+                    acc["maxAmountRequired"] = acc["amount"]
+            response.headers["payment-required"] = _b64.b64encode(
+                _json.dumps(payload).encode()
+            ).decode()
+        except Exception as e:
+            print(f"[x402-fix] failed to rewrite header: {e}")
+    return response
+
 @app.get("/")
 def root():
     return {
