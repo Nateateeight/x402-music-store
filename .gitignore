@@ -1,0 +1,20 @@
+# Secrets / keys — NEVER commit
+.env
+.keys/
+*.json.key
+
+# Virtual env
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Music library (point MUSIC_DIR at your own; do not bundle)
+Music_Library/
+../Music_Library/
+
+# OS
+.DS_Store

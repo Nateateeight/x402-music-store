@@ -1,0 +1,22 @@
+[project]
+name = "x402-music-service"
+version = "0.1.0"
+description = "Self-hosted x402 music store — agents pay USDC on Base for MP3 tracks"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.20.0",
+    "python-dotenv>=1.0.0",
+    "x402>=2.15.0",
+    "cdp-sdk>=1.47.0",
+    "eth-account>=0.13.0",
+    "web3>=7.0.0",
+    "requests>=2.31.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]

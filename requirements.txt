@@ -1,0 +1,8 @@
+cdp-sdk==1.47.1
+eth-account==0.13.7
+fastapi==0.139.0
+python-dotenv==1.2.2
+requests==2.34.2
+uvicorn==0.51.0
+web3==7.16.0
+x402==2.15.0
