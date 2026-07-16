@@ -199,6 +199,47 @@ def x402_manifest():
     return MANIFEST
 
 
+# ---------------------------------------------------------------------------
+# the402 webhook receiver
+# the402 POSTs purchase/settlement events here, signed with your Svix secret
+# (whsec_...). We verify the signature before trusting the payload.
+# ---------------------------------------------------------------------------
+import hashlib
+import hmac
+import base64
+import json as _json
+
+WEBHOOK_SECRET = os.getenv("THE402_WEBHOOK_SECRET", "")  # whsec_...
+
+
+def _verify_svix_sig(payload: bytes, header_sig: str, timestamp: str) -> bool:
+    """Verify a Svix-style webhook signature (HMAC-SHA256, base64)."""
+    if not WEBHOOK_SECRET or not header_sig:
+        return False
+    key = base64.b64decode(WEBHOOK_SECRET.replace("whsec_", ""))
+    msg = f"{timestamp}.".encode() + payload
+    expected = hmac.new(key, msg, hashlib.sha256).digest()
+    got = base64.b64decode(header_sig)
+    return hmac.compare_digest(expected, got)
+
+
+@app.post("/webhook")
+async def the402_webhook(request):
+    body = await request.body()
+    sig = request.headers.get("webhook-signature", "")
+    ts = request.headers.get("webhook-timestamp", "")
+    # Svix format: "v1,<base64sig>"
+    sig_part = sig.split(",")[-1] if sig else ""
+    if not _verify_svix_sig(body, sig_part, ts):
+        # Still log the event even if signature can't be verified (debugging)
+        print(f"[webhook] unverified payload: {body[:200]}")
+        from fastapi import status
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="bad signature")
+    event = _json.loads(body)
+    print(f"[webhook] verified event: {event.get('type')} -> {_json.dumps(event)[:300]}")
+    return {"ok": True}
+
+
 if __name__ == "__main__":
     import uvicorn
     import traceback
