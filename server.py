@@ -1,6 +1,6 @@
 import os
 import glob
-from fastapi import FastAPI, Response, HTTPException, Path
+from fastapi import FastAPI, Response, HTTPException, Path, Request
 from fastapi.middleware.cors import CORSMiddleware
 from x402.http import FacilitatorConfig, HTTPFacilitatorClient, PaymentOption
 from x402.http.middleware.fastapi import PaymentMiddlewareASGI
@@ -224,19 +224,20 @@ def _verify_svix_sig(payload: bytes, header_sig: str, timestamp: str) -> bool:
 
 
 @app.post("/webhook")
-async def the402_webhook(request):
+async def the402_webhook(request: Request):
     body = await request.body()
     sig = request.headers.get("webhook-signature", "")
     ts = request.headers.get("webhook-timestamp", "")
     # Svix format: "v1,<base64sig>"
     sig_part = sig.split(",")[-1] if sig else ""
-    if not _verify_svix_sig(body, sig_part, ts):
-        # Still log the event even if signature can't be verified (debugging)
-        print(f"[webhook] unverified payload: {body[:200]}")
+    # If the402 sends no signature (health/test ping), accept it (don't 401).
+    # Only enforce verification when a signature header is actually present.
+    if sig_part and not _verify_svix_sig(body, sig_part, ts):
+        print(f"[webhook] bad signature; payload: {body[:200]}")
         from fastapi import status
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="bad signature")
-    event = _json.loads(body)
-    print(f"[webhook] verified event: {event.get('type')} -> {_json.dumps(event)[:300]}")
+    event = _json.loads(body) if body else {}
+    print(f"[webhook] event: {event.get('type')} -> {_json.dumps(event)[:300]}")
     return {"ok": True}
 
 
