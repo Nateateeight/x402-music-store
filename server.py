@@ -17,6 +17,7 @@ EVM_ADDRESS = os.getenv("EVM_ADDRESS")
 # CDP mainnet facilitator (supports eip155:8453 exact). Key loaded from JSON file.
 CDP_KEY_PATH = os.getenv("CDP_API_KEY_PATH", "/Users/nate/Downloads/cdp_api_key.json")
 MUSIC_DIR = "/Users/nate/Music_Library"
+STEM_DIR = "/Volumes/WD_BLACK/usb-disk-archive/owl-workspace/projects/suno-catalog/stems/htdemucs_ft"
 
 if not EVM_ADDRESS:
     raise RuntimeError("EVM_ADDRESS must be set in .env")
@@ -26,13 +27,23 @@ AVAILABLE_TRACKS = {}
 for root, dirs, files in os.walk(MUSIC_DIR):
     for file in files:
         if file.lower().endswith('.mp3'):
-            # Store the relative path from MUSIC_DIR as the key
             rel_path = os.path.relpath(os.path.join(root, file), MUSIC_DIR)
-            # Use the relative path as the key for the URL
             AVAILABLE_TRACKS[rel_path] = os.path.join(root, file)
 
-if not AVAILABLE_TRACKS:
-    raise RuntimeError(f"No MP3 files found in {MUSIC_DIR}")
+# Pre-load list of available stems (4 per song)
+AVAILABLE_STEMS = {}
+if os.path.isdir(STEM_DIR):
+    for song_dir in os.listdir(STEM_DIR):
+        song_path = os.path.join(STEM_DIR, song_dir)
+        if os.path.isdir(song_path):
+            for stem in ['vocals.mp3', 'drums.mp3', 'bass.mp3', 'other.mp3']:
+                stem_path = os.path.join(song_path, stem)
+                if os.path.exists(stem_path):
+                    key = f"{song_dir}/{stem}"
+                    AVAILABLE_STEMS[key] = stem_path
+
+if not AVAILABLE_TRACKS and not AVAILABLE_STEMS:
+    raise RuntimeError(f"No MP3 files found in {MUSIC_DIR} or {STEM_DIR}")
 
 # Initialize x402 protection with CDP mainnet facilitator (authenticated)
 import json
@@ -66,12 +77,24 @@ routes = {
             PaymentOption(
                 scheme="exact",
                 pay_to=EVM_ADDRESS,
-                price="$0.25",  # 25 cents per track
+                price="$0.05",  # 5 cents per track
                 network="eip155:8453",
             )
         ],
         mime_type="audio/mpeg",
         description="Full music track",
+    ),
+    "GET /stem/*": RouteConfig(
+        accepts=[
+            PaymentOption(
+                scheme="exact",
+                pay_to=EVM_ADDRESS,
+                price="$0.05",  # 5 cents per stem
+                network="eip155:8453",
+            )
+        ],
+        mime_type="audio/mpeg",
+        description="Isolated stem (vocals, drums, bass, other)",
     ),
     "GET /preview/*": RouteConfig(
         accepts=[],  # No protection needed for preview
@@ -125,11 +148,13 @@ def root():
     return {
         "message": "Welcome to Nate's Music Store",
         "total_tracks": len(AVAILABLE_TRACKS),
+        "total_stems": len(AVAILABLE_STEMS),
         "sample_tracks": list(AVAILABLE_TRACKS.keys())[:5],
         "endpoints": {
-            "catalog": "/catalog - List all available tracks",
+            "catalog": "/catalog - List all available tracks and stems",
             "preview": "/preview/*filepath - Free 30-second sample",
-            "track": "/track/*filepath - Full track ($0.25)",
+            "track": "/track/*filepath - Full track ($0.05)",
+            "stem": "/stem/*filepath - Isolated stem ($0.05)",
             "health": "/health - Service status",
         },
     }
@@ -140,9 +165,13 @@ def health():
 
 @app.get("/catalog")
 def catalog():
-    """Return a list of all available tracks (relative paths)."""
-    # Return sorted list for consistency
-    return {"tracks": sorted(AVAILABLE_TRACKS.keys())}
+    """Return a list of all available tracks and stems."""
+    return {
+        "tracks": sorted(AVAILABLE_TRACKS.keys()),
+        "stems": sorted(AVAILABLE_STEMS.keys()),
+        "total_tracks": len(AVAILABLE_TRACKS),
+        "total_stems": len(AVAILABLE_STEMS),
+    }
 
 @app.get("/track/{filepath:path}")
 def get_track(filepath: str = Path(...)):
@@ -154,6 +183,18 @@ def get_track(filepath: str = Path(...)):
     if filepath not in AVAILABLE_TRACKS:
         raise HTTPException(status_code=404, detail="Track not found")
     full_path = AVAILABLE_TRACKS[filepath]
+    try:
+        with open(full_path, "rb") as f:
+            content = f.read()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return Response(content=content, media_type="audio/mpeg")
+
+@app.get("/stem/{filepath:path}")
+def get_stem(filepath: str = Path(...)):
+    if filepath not in AVAILABLE_STEMS:
+        raise HTTPException(status_code=404, detail="Stem not found")
+    full_path = AVAILABLE_STEMS[filepath]
     try:
         with open(full_path, "rb") as f:
             content = f.read()
@@ -205,12 +246,21 @@ MANIFEST = {
         },
         "/track/{filepath}": {
             "kind": "x402-payment",
-            "amount": "$0.25",
+            "amount": "$0.05",
             "asset": "USDC",
             "network": "eip155:8453",
             "payTo": EVM_ADDRESS,
             "mimeType": "audio/mpeg",
             "description": "Full music track download",
+        },
+        "/stem/{filepath}": {
+            "kind": "x402-payment",
+            "amount": "$0.05",
+            "asset": "USDC",
+            "network": "eip155:8453",
+            "payTo": EVM_ADDRESS,
+            "mimeType": "audio/mpeg",
+            "description": "Isolated stem (vocals, drums, bass, other)",
         },
         "/preview/{filepath}": {
             "kind": "free",
@@ -266,6 +316,49 @@ async def the402_webhook(request: Request):
     event = _json.loads(body) if body else {}
     print(f"[webhook] event: {event.get('type')} -> {_json.dumps(event)[:300]}")
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# OpenAPI hardening for x402scan / agent auto-probe compatibility.
+# The x402scan probe expects every discovered route to EITHER return a 402
+# (paid) OR declare itself intentionally free via "security": [] in the
+# OpenAPI spec. Our free routes (/health, /catalog, /preview/*,
+# /.well-known/x402.json) are absent from the x402 `routes` dict, so they
+# return 200 — without "security": [] the probe flags them as errors and
+# blocks listing. `/` is paid (returns 402) but has no request schema, which
+# the probe also rejects ("Missing input schema"). This override post-processes
+# the generated schema to satisfy both. Reversible: delete this block to revert.
+# ---------------------------------------------------------------------------
+_FREE_ROUTES = {"/health", "/catalog", "/.well-known/x402.json", "/preview/{filepath}"}
+
+def _custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    schema = get_openapi(title=app.title, version="1.0.0", routes=app.routes)
+    for path, ops in schema.get("paths", {}).items():
+        if path in _FREE_ROUTES:
+            for method in ops.values():
+                method["security"] = []
+        if path == "/":
+            # paid route with no params -> give the probe a request schema
+            for method in ops.values():
+                if "requestBody" not in method:
+                    method["requestBody"] = {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {},
+                                    "title": "RootRequest",
+                                }
+                            }
+                        }
+                    }
+    app.openapi_schema = schema
+    return schema
+
+from fastapi.openapi.utils import get_openapi
+app.openapi = _custom_openapi
 
 
 if __name__ == "__main__":
